@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebScreen Pro Viewer</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
+        h1 { margin-bottom: 10px; color: #f1f1f1; }
+        video { 
+            width: 100%; 
+            max-width: 800px; 
+            min-height: 450px; 
+            background: #000; 
+            border: 2px solid #333;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        #status { 
+            margin: 15px; 
+            padding: 10px 20px; 
+            font-weight: bold; 
+            color: #ff9800; 
+            background: #1e1e1e;
+            display: inline-block;
+            border-radius: 30px;
+        }
+        .btn { 
+            background: #4CAF50; 
+            color: white; 
+            border: none; 
+            padding: 15px 30px; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            font-size: 1.1em;
+            font-weight: bold;
+            margin-top: 20px;
+            transition: background 0.3s;
+        }
+        .btn:hover { background: #45a049; }
+    </style>
+</head>
+<body>
+    <h1>WebScreen Lite</h1>
+    <div id="status">Connecting to Firebase...</div>
+    <br>
+    <video id="remoteVideo" autoplay playsinline></video>
+    <br>
+    <button class="btn" onclick="startStream()">UNMUTE & START STREAM</button>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-app.js";
+        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCR--mIMXA96W4CtXPq1KxYptWhKNan5Dg",
+            authDomain: "webscreenlite.firebaseapp.com",
+            projectId: "webscreenlite",
+            storageBucket: "webscreenlite.firebasestorage.app",
+            messagingSenderId: "486527120453",
+            appId: "1:486527120453:web:e24b8e882b8ec7807d5f2c"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const sessionId = "test_session_123";
+        const sessionRef = doc(db, "sessions", sessionId);
+
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                { 
+                    urls: "turn:openrelay.metered.ca:443?transport=tcp", 
+                    username: "openrelayproject", 
+                    credential: "openrelayproject" 
+                }
+            ]
+        });
+
+        let isRemoteDescriptionSet = false;
+        const candidateBuffer = [];
+
+        // Track listener for both Audio and Video
+        pc.ontrack = (event) => {
+            console.log("Remote track detected:", event.track.kind);
+            const status = document.getElementById('status');
+            status.innerText = "STREAMING LIVE (Audio Enabled)";
+            status.style.color = "#4CAF50";
+
+            const remoteVideo = document.getElementById('remoteVideo');
+            if (event.streams && event.streams[0]) {
+                remoteVideo.srcObject = event.streams[0];
+            } else {
+                if (!remoteVideo.srcObject) remoteVideo.srcObject = new MediaStream();
+                remoteVideo.srcObject.addTrack(event.track);
+            }
+        };
+
+        // Browser requires manual click to play unmuted audio
+        window.startStream = () => {
+            const video = document.getElementById('remoteVideo');
+            video.muted = false;
+            video.play().catch(e => console.error("Playback failed:", e));
+        };
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                const candRef = collection(db, "sessions", sessionId, "candidates");
+                addDoc(candRef, {
+                    candidate: event.candidate.candidate,
+                    sdpMid: event.candidate.sdpMid,
+                    sdpMLineIndex: event.candidate.sdpMLineIndex,
+                    origin: "web"
+                });
+            }
+        };
+
+        // Listen for Offer
+        onSnapshot(sessionRef, async (snapshot) => {
+            const data = snapshot.data();
+            if (data?.offer && !pc.currentRemoteDescription) {
+                console.log("Offer received from Android...");
+                await pc.setRemoteDescription(new RTCSessionDescription({
+                    type: 'offer',
+                    sdp: data.offer.sdp
+                }));
+
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                await updateDoc(sessionRef, {
+                    answer: { type: 'answer', sdp: answer.sdp }
+                });
+
+                isRemoteDescriptionSet = true;
+                while (candidateBuffer.length > 0) {
+                    const cand = candidateBuffer.shift();
+                    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => {});
+                }
+            }
+        });
+
+        // Listen for Candidates
+        const q = query(collection(db, "sessions", sessionId, "candidates"), where("origin", "==", "android"));
+        onSnapshot(q, (snapshot) => {
+            snapshot.docChanges().forEach(async (change) => {
+                if (change.type === "added") {
+                    const data = change.doc.data();
+                    const candidateInit = {
+                        candidate: data.candidate,
+                        sdpMid: data.sdpMid,
+                        sdpMLineIndex: parseInt(data.sdpMLineIndex)
+                    };
+
+                    if (!isRemoteDescriptionSet) {
+                        candidateBuffer.push(candidateInit);
+                    } else {
+                        await pc.addIceCandidate(new RTCIceCandidate(candidateInit)).catch(e => {});
+                    }
+                }
+            });
+        });
+
+        pc.oniceconnectionstatechange = () => {
+            const state = pc.iceConnectionState;
+            document.getElementById('status').innerText = "ICE: " + state.toUpperCase();
+            if (state === "connected") document.getElementById('status').style.color = "#4CAF50";
+        };
+    </script>
+</body>
+</html>
