@@ -1,19 +1,10 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebScreen Pro Viewer</title>
+    <title>WebScreen Lite Remote</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
-        h1 { margin-bottom: 10px; color: #f1f1f1; }
-        video { 
-            width: 100%; 
-            max-width: 800px; 
-            min-height: 450px; 
-            background: #000; 
-            border: 2px solid #333;
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-        }
+        h1 { margin-bottom: 5px; color: #f1f1f1; }
         #status { 
             margin: 15px; 
             padding: 10px 20px; 
@@ -22,34 +13,55 @@
             background: #1e1e1e;
             display: inline-block;
             border-radius: 30px;
+            border: 1px solid #333;
         }
+        video { 
+            width: 100%; 
+            max-width: 800px; 
+            min-height: 450px; 
+            background: #000; 
+            border: 2px solid #444;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        .controls { margin-top: 20px; }
         .btn { 
-            background: #4CAF50; 
-            color: white; 
             border: none; 
-            padding: 15px 30px; 
+            padding: 15px 35px; 
             border-radius: 8px; 
             cursor: pointer; 
-            font-size: 1.1em;
+            font-size: 1em;
             font-weight: bold;
-            margin-top: 20px;
-            transition: background 0.3s;
+            margin: 10px;
+            transition: transform 0.1s, background 0.3s;
         }
-        .btn:hover { background: #45a049; }
+        .btn:active { transform: scale(0.95); }
+        .btn-start { background: #4CAF50; color: white; }
+        .btn-stop { background: #f44336; color: white; }
+        .btn-unmute { background: #2196F3; color: white; }
     </style>
 </head>
 <body>
+
     <h1>WebScreen Lite</h1>
-    <div id="status">Connecting to Firebase...</div>
+    <div id="status">REDMI STATUS: IDLE (Battery Saving)</div>
+    
     <br>
     <video id="remoteVideo" autoplay playsinline></video>
     <br>
-    <button class="btn" onclick="startStream()">UNMUTE & START STREAM</button>
+
+    <div class="controls">
+        <button class="btn btn-start" onclick="triggerCommand('START_STREAM')">START MONITORING</button>
+        <button class="btn btn-stop" onclick="triggerCommand('STOP_STREAM')">STOP & DEEP SLEEP</button>
+        <br>
+        <button class="btn btn-unmute" onclick="enableAudio()">CLICK TO UNMUTE AUDIO</button>
+    </div>
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-app.js";
-        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
+        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where, deleteDoc, getDocs } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
 
+        // --- PASTE YOUR FIREBASE CONFIG HERE ---
         const firebaseConfig = {
             apiKey: "AIzaSyCR--mIMXA96W4CtXPq1KxYptWhKNan5Dg",
             authDomain: "webscreenlite.firebaseapp.com",
@@ -64,106 +76,131 @@
         const sessionId = "test_session_123";
         const sessionRef = doc(db, "sessions", sessionId);
 
-        const pc = new RTCPeerConnection({
-            iceServers: [
-                { urls: "stun:stun.l.google.com:19302" },
-                { 
-                    urls: "turn:openrelay.metered.ca:443?transport=tcp", 
-                    username: "openrelayproject", 
-                    credential: "openrelayproject" 
-                }
-            ]
-        });
-
+        let pc = createPeerConnection();
         let isRemoteDescriptionSet = false;
         const candidateBuffer = [];
 
-        // Track listener for both Audio and Video
-        pc.ontrack = (event) => {
-            console.log("Remote track detected:", event.track.kind);
-            const status = document.getElementById('status');
-            status.innerText = "STREAMING LIVE (Audio Enabled)";
-            status.style.color = "#4CAF50";
+        function createPeerConnection() {
+            const newPc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: "stun:stun.l.google.com:19302" },
+                    { 
+                        urls: "turn:openrelay.metered.ca:443?transport=tcp", 
+                        username: "openrelayproject", 
+                        credential: "openrelayproject" 
+                    }
+                ]
+            });
 
-            const remoteVideo = document.getElementById('remoteVideo');
-            if (event.streams && event.streams[0]) {
-                remoteVideo.srcObject = event.streams[0];
+            newPc.ontrack = (event) => {
+                console.log("Track received:", event.track.kind);
+                document.getElementById('status').innerText = "STREAMING LIVE";
+                document.getElementById('status').style.color = "#4CAF50";
+                
+                const remoteVideo = document.getElementById('remoteVideo');
+                if (event.streams && event.streams[0]) {
+                    remoteVideo.srcObject = event.streams[0];
+                } else {
+                    if (!remoteVideo.srcObject) remoteVideo.srcObject = new MediaStream();
+                    remoteVideo.srcObject.addTrack(event.track);
+                }
+            };
+
+            newPc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    addDoc(collection(db, "sessions", sessionId, "candidates"), {
+                        candidate: event.candidate.candidate,
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex,
+                        origin: "web"
+                    });
+                }
+            };
+
+            newPc.oniceconnectionstatechange = () => {
+                console.log("ICE State:", newPc.iceConnectionState);
+            };
+
+            return newPc;
+        }
+
+        // REMOTE COMMAND TRIGGER
+        window.triggerCommand = async (cmd) => {
+            const statusBox = document.getElementById('status');
+            if (cmd === 'START_STREAM') {
+                statusBox.innerText = "WAKING REDMI PHONE...";
+                statusBox.style.color = "#ff9800";
+                
+                // Clear old signaling data to ensure a clean start
+                await updateDoc(sessionRef, { 
+                    command: cmd, 
+                    offer: null, 
+                    answer: null 
+                });
+                
+                // Refresh PeerConnection for new session
+                if(pc) pc.close();
+                pc = createPeerConnection();
+                isRemoteDescriptionSet = false;
+
             } else {
-                if (!remoteVideo.srcObject) remoteVideo.srcObject = new MediaStream();
-                remoteVideo.srcObject.addTrack(event.track);
+                statusBox.innerText = "SENDING SLEEP COMMAND...";
+                await updateDoc(sessionRef, { command: cmd });
+                document.getElementById('remoteVideo').srcObject = null;
             }
         };
 
-        // Browser requires manual click to play unmuted audio
-        window.startStream = () => {
+        window.enableAudio = () => {
             const video = document.getElementById('remoteVideo');
             video.muted = false;
-            video.play().catch(e => console.error("Playback failed:", e));
+            video.play();
         };
 
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-                const candRef = collection(db, "sessions", sessionId, "candidates");
-                addDoc(candRef, {
-                    candidate: event.candidate.candidate,
-                    sdpMid: event.candidate.sdpMid,
-                    sdpMLineIndex: event.candidate.sdpMLineIndex,
-                    origin: "web"
-                });
-            }
-        };
-
-        // Listen for Offer
+        // SIGNALING: LISTEN FOR OFFER FROM ANDROID
         onSnapshot(sessionRef, async (snapshot) => {
             const data = snapshot.data();
-            if (data?.offer && !pc.currentRemoteDescription) {
-                console.log("Offer received from Android...");
-                await pc.setRemoteDescription(new RTCSessionDescription({
-                    type: 'offer',
-                    sdp: data.offer.sdp
-                }));
+            
+            // UI Status Update
+            if (data?.command === "IDLE") {
+                document.getElementById('status').innerText = "REDMI STATUS: IDLE (Battery Saving)";
+                document.getElementById('status').style.color = "#ff9800";
+            }
 
+            // WebRTC Handshake
+            if (data?.offer && !pc.currentRemoteDescription) {
+                console.log("Offer detected, creating answer...");
+                await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
-
-                await updateDoc(sessionRef, {
-                    answer: { type: 'answer', sdp: answer.sdp }
-                });
-
+                await updateDoc(sessionRef, { answer: { type: 'answer', sdp: answer.sdp } });
+                
                 isRemoteDescriptionSet = true;
                 while (candidateBuffer.length > 0) {
-                    const cand = candidateBuffer.shift();
-                    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => {});
+                    await pc.addIceCandidate(new RTCIceCandidate(candidateBuffer.shift())).catch(e => {});
                 }
             }
         });
 
-        // Listen for Candidates
+        // SIGNALING: LISTEN FOR ICE CANDIDATES FROM ANDROID
         const q = query(collection(db, "sessions", sessionId, "candidates"), where("origin", "==", "android"));
         onSnapshot(q, (snapshot) => {
             snapshot.docChanges().forEach(async (change) => {
                 if (change.type === "added") {
                     const data = change.doc.data();
-                    const candidateInit = {
+                    const candidate = {
                         candidate: data.candidate,
                         sdpMid: data.sdpMid,
                         sdpMLineIndex: parseInt(data.sdpMLineIndex)
                     };
 
                     if (!isRemoteDescriptionSet) {
-                        candidateBuffer.push(candidateInit);
+                        candidateBuffer.push(candidate);
                     } else {
-                        await pc.addIceCandidate(new RTCIceCandidate(candidateInit)).catch(e => {});
+                        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => {});
                     }
                 }
             });
         });
-
-        pc.oniceconnectionstatechange = () => {
-            const state = pc.iceConnectionState;
-            document.getElementById('status').innerText = "ICE: " + state.toUpperCase();
-            if (state === "connected") document.getElementById('status').style.color = "#4CAF50";
-        };
     </script>
 </body>
 </html>
