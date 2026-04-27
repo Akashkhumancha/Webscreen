@@ -4,7 +4,7 @@
     <title>WebScreen Lite Pro Viewer</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: white; text-align: center; padding: 20px; }
-        video { width: 100%; max-width: 800px; min-height: 450px; background: #000; border: 2px solid #333; border-radius: 12px; }
+        video { width: 100%; max-width: 800px; min-height: 450px; background: #000; border: 2px solid #444; border-radius: 12px; }
         .btn { padding: 15px 35px; border-radius: 8px; cursor: pointer; font-weight: bold; margin: 10px; border: none; font-size: 16px; }
         #status { color: #ff9800; font-weight: bold; margin: 15px; padding: 10px; background: #1e1e1e; display: inline-block; border-radius: 20px; }
     </style>
@@ -23,7 +23,7 @@
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-app.js";
-        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
+        import { getFirestore, doc, onSnapshot, updateDoc, collection, addDoc, query, where, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.1/firebase-firestore.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyCR--mIMXA96W4CtXPq1KxYptWhKNan5Dg",
@@ -47,7 +47,6 @@
             if (pc) pc.close();
             remoteSet = false;
             buffer.length = 0;
-
             pc = new RTCPeerConnection({
                 iceServers: [
                     { urls: "stun:stun.l.google.com:19302" },
@@ -55,92 +54,68 @@
                     { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" }
                 ]
             });
-
             pc.ontrack = (e) => {
                 document.getElementById('remoteVideo').srcObject = e.streams[0];
                 document.getElementById('status').innerText = "STREAMING LIVE";
                 document.getElementById('status').style.color = "#4CAF50";
             };
-
             pc.onicecandidate = (e) => {
-                if (e.candidate) {
-                    addDoc(collection(db, "sessions", sessionId, "candidates"), {
-                        candidate: e.candidate.candidate, 
-                        sdpMid: e.candidate.sdpMid, 
-                        sdpMLineIndex: e.candidate.sdpMLineIndex, 
-                        origin: "web"
-                    });
-                }
+                if (e.candidate) addDoc(collection(db, "sessions", sessionId, "candidates"), {
+                    candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex, origin: "web"
+                });
+            };
+            pc.oniceconnectionstatechange = () => {
+                document.getElementById('status').innerText = "ICE: " + pc.iceConnectionState.toUpperCase();
             };
         }
 
         window.trigger = async (cmd) => {
-            const statusBox = document.getElementById('status');
             if (cmd === 'START_STREAM') {
-                statusBox.innerText = "RESETTING SESSION...";
-                initPeerConnection();
-                // Clear signaling to force Redmi to send a brand NEW offer
-                await updateDoc(sessionRef, { command: cmd, offer: null, answer: null });
+                handleReload(); // Reuse reload logic for manual start
             } else {
-                statusBox.innerText = "STOPPING...";
                 await updateDoc(sessionRef, { command: "STOP_STREAM" });
                 if(pc) pc.close();
                 document.getElementById('remoteVideo').srcObject = null;
             }
         };
 
-        // AUTO-RESET ON RELOAD
         async function handleReload() {
-            console.log("Reload detected. Clearing signaling...");
+            console.log("Atomic Reload...");
             initPeerConnection();
-            document.getElementById('status').innerText = "RECONNECTING...";
+            document.getElementById('status').innerText = "CLEANING GHOST SESSION...";
             
-            // Wiping these fields is the "Signal" for Android to restart
-            await updateDoc(sessionRef, { 
-                offer: null, 
-                answer: null, 
-                command: "START_STREAM" 
-            });
+            // 1. Wipe signaling fields
+            await updateDoc(sessionRef, { offer: null, answer: null, command: "START_STREAM" });
+
+            // 2. Wipe ALL old candidates (Critical to fix Disconnect issue)
+            const snap = await getDocs(collection(db, "sessions", sessionId, "candidates"));
+            snap.forEach(async (c) => await deleteDoc(c.ref));
         }
 
         onSnapshot(sessionRef, async (snap) => {
             const data = snap.data();
-            
             if (data?.offer && pc && !pc.currentRemoteDescription) {
-                console.log("Offer received from Android");
                 await pc.setRemoteDescription(new RTCSessionDescription({
-                    type: data.offer.type.toLowerCase(),
-                    sdp: data.offer.sdp
+                    type: data.offer.type.toLowerCase(), sdp: data.offer.sdp
                 }));
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 await updateDoc(sessionRef, { answer: { type: 'answer', sdp: answer.sdp } });
                 remoteSet = true;
-                while(buffer.length > 0) pc.addIceCandidate(new RTCIceCandidate(buffer.shift())).catch(e => {});
-            }
-
-            if (data?.command === "IDLE") {
-                document.getElementById('status').innerText = "REDMI STATUS: IDLE";
-                document.getElementById('status').style.color = "#ff9800";
+                while(buffer.length > 0) await pc.addIceCandidate(new RTCIceCandidate(buffer.shift())).catch(e => {});
             }
         });
 
         onSnapshot(query(collection(db, "sessions", sessionId, "candidates"), where("origin", "==", "android")), (snap) => {
-            snap.docChanges().forEach(change => {
+            snap.docChanges().forEach(async (change) => {
                 if (change.type === "added") {
                     const d = change.doc.data();
-                    const cand = {
-                        candidate: d.candidate,
-                        sdpMid: d.sdpMid,
-                        sdpMLineIndex: d.sdpMLineIndex
-                    };
-                    if (!remoteSet) buffer.push(cand); 
-                    else pc.addIceCandidate(new RTCIceCandidate(cand)).catch(()=>{});
+                    const cand = { candidate: d.candidate, sdpMid: d.sdpMid, sdpMLineIndex: d.sdpMLineIndex };
+                    if (!remoteSet) buffer.push(cand); else await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(()=>{});
                 }
             });
         });
 
-        // Trigger automatic connection on page load
         handleReload();
     </script>
 </body>
